@@ -1,0 +1,8 @@
+{
+  "name": "Myraa - Living AI Companion",
+  "description": "An intelligent, empathetic AI companion featuring real-time speech, natural interruptions, human-like pacing, emotional voice variation, and session memory.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

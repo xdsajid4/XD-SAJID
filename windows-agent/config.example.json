@@ -1,0 +1,55 @@
+{
+  "host": "127.0.0.1",
+  "port": 41199,
+  "auth_token": "myraa-secure-local-token",
+  "allowed_origins": [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "*"
+  ],
+  "allowed_directories": [
+    "C:\\Users\\YourUsername\\Documents",
+    "C:\\Users\\YourUsername\\Downloads",
+    "C:\\Users\\YourUsername\\Desktop",
+    "C:\\MyraaWorkspace"
+  ],
+  "allowed_apps": {
+    "chrome": [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      "chrome.exe"
+    ],
+    "notepad": [
+      "C:\\Windows\\system32\\notepad.exe",
+      "notepad.exe"
+    ],
+    "calculator": [
+      "C:\\Windows\\system32\\calc.exe",
+      "calc.exe"
+    ],
+    "calc": [
+      "C:\\Windows\\system32\\calc.exe",
+      "calc.exe"
+    ],
+    "explorer": [
+      "C:\\Windows\\explorer.exe",
+      "explorer.exe"
+    ],
+    "vscode": [
+      "C:\\Users\\YourUsername\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+      "code.cmd",
+      "code.exe"
+    ],
+    "code": [
+      "C:\\Users\\YourUsername\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+      "code.cmd",
+      "code.exe"
+    ],
+    "edge": [
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "msedge.exe"
+    ]
+  }
+}
