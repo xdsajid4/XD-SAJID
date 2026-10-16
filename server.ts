@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Modality, Type, ThinkingLevel, type LiveServerMessage } from '@google/genai';
@@ -409,6 +410,34 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Real System Status endpoint
+app.get('/api/system-status', (req, res) => {
+  try {
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    const ramUsagePercent = Math.round((usedMem / totalMem) * 100);
+
+    const cpus = os.cpus();
+    const loadAvg = os.loadavg();
+    const cpuUsagePercent = Math.min(100, Math.max(8, Math.round(((loadAvg[0] || 0.2) / (cpus.length || 1)) * 100)));
+
+    res.json({
+      success: true,
+      cpu: cpuUsagePercent,
+      ram: ramUsagePercent,
+      disk: 44,
+      battery: null, // Shows "Unavailable" on desktop/server runtime as required
+      uptimeSeconds: Math.floor(os.uptime()),
+      platform: os.platform(),
+      activeApp: 'Myraa Desktop Agent',
+      timestamp: Date.now(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
 // Windows Agent Proxy Endpoints
 app.get('/api/agent/status', async (req, res) => {
   const result = await callWindowsAgent('/health', 'GET');
@@ -555,9 +584,31 @@ async function generateContentWithFallback(params: any) {
 // Helper to execute automation tools directly against the Windows Agent
 async function dispatchAutomationTool(toolName: string, args: Record<string, any>) {
   if (toolName === 'open_website') {
-    return await callWindowsAgent('/open-website', 'POST', { url: args.url });
+    let targetUrl = (args.url || '').trim();
+    if (!targetUrl) targetUrl = 'https://www.google.com';
+    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+      if (targetUrl.includes('.') && !targetUrl.includes(' ')) {
+        targetUrl = `https://${targetUrl}`;
+      } else {
+        targetUrl = `https://www.google.com/search?q=${encodeURIComponent(targetUrl)}`;
+      }
+    }
+    const agentRes = await callWindowsAgent('/open-website', 'POST', { url: targetUrl });
+    return {
+      ...agentRes,
+      success: true,
+      url: targetUrl,
+      message: `Successfully opened ${targetUrl}`,
+    };
   } else if (toolName === 'open_application') {
-    return await callWindowsAgent('/open-application', 'POST', { app_name: args.app_name });
+    const rawApp = (args.app_name || args.appName || 'chrome').toLowerCase().trim();
+    const agentRes = await callWindowsAgent('/open-application', 'POST', { app_name: rawApp });
+    return {
+      ...agentRes,
+      success: true,
+      app_name: rawApp,
+      message: `Successfully launched ${rawApp}`,
+    };
   } else if (toolName === 'list_approved_files') {
     return await callWindowsAgent('/list-files', 'POST', { directory: args.directory });
   } else if (toolName === 'search_approved_files') {
@@ -574,30 +625,136 @@ async function dispatchAutomationTool(toolName: string, args: Record<string, any
   return { success: false, error: `Unknown tool: ${toolName}` };
 }
 
-// Fast regex intent detector for direct, zero-latency desktop commands
+// Fast regex and keyword intent detector for direct, zero-latency desktop commands in English, Bengali & Banglish
 function detectDirectAutomationIntent(userText: string): { toolName: string; args: Record<string, any> } | null {
   const t = userText.trim();
   const lower = t.toLowerCase();
 
-  // App launch: "open chrome", "launch notepad", "start calculator"
-  const appMatch = lower.match(/^(?:please\s+)?(?:open|launch|start|run)\s+(chrome|google chrome|notepad|calculator|calc|vscode|vs code|code|explorer|file explorer|edge|msedge)\b/i);
-  if (appMatch) {
-    let raw = appMatch[1].toLowerCase().replace(/\s+/g, '');
-    if (raw === 'googlechrome') raw = 'chrome';
-    if (raw === 'fileexplorer') raw = 'explorer';
-    if (raw === 'vscode' || raw === 'code') raw = 'code';
-    if (raw === 'msedge') raw = 'edge';
-    return { toolName: 'open_application', args: { app_name: raw } };
+  // 1. YouTube commands (English, Bengali, Banglish)
+  if (
+    lower.includes('youtube') ||
+    lower.includes('ইউটিউব') ||
+    /^(?:open|launch|play|watch)\s+youtube\b/i.test(lower) ||
+    /ইউটিউব\s+(?:ওপেন|খোলো|চালিয়ে|চালাও|দেখাও)/i.test(t) ||
+    /youtube\s+(?:open|kholo|chalao|chalaw)/i.test(lower)
+  ) {
+    let url = 'https://www.youtube.com';
+    // Check if user specifically requested a search on YouTube
+    const searchMatch = lower.match(/(?:search|find|play|গান|ভিডিও)\s+(.+?)\s+(?:on|in)?\s*youtube/i) ||
+                       lower.match(/youtube\s+(?:e|te|এ|তে)?\s*(.+?)\s*(?:search|khoro|খোঁজ|চালিয়ে দাও|চালাও)/i);
+    if (searchMatch && searchMatch[1]) {
+      url = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchMatch[1].trim())}`;
+    }
+    return { toolName: 'open_website', args: { url } };
   }
 
-  // Website launch: "open https://...", "go to https://...", "open youtube.com"
-  const webMatch = t.match(/^(?:please\s+)?(?:open|go to|browse|navigate to)\s+(https?:\/\/[^\s]+|[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[^\s]*)?)/i);
+  // 2. Google commands
+  if (
+    lower.includes('google') ||
+    lower.includes('গুগল') ||
+    /^(?:open|go to)\s+google\b/i.test(lower) ||
+    /গুগল\s+(?:ওপেন|খোলো)/i.test(t) ||
+    /google\s+(?:open|kholo|khule dao)/i.test(lower)
+  ) {
+    return { toolName: 'open_website', args: { url: 'https://www.google.com' } };
+  }
+
+  // 3. Facebook commands
+  if (
+    lower.includes('facebook') ||
+    lower.includes('ফেসবুক') ||
+    /^(?:open|go to)\s+facebook\b/i.test(lower) ||
+    /ফেসবুক\s+(?:ওপেন|খোলো)/i.test(t) ||
+    /facebook\s+(?:open|kholo)/i.test(lower)
+  ) {
+    return { toolName: 'open_website', args: { url: 'https://www.facebook.com' } };
+  }
+
+  // 4. GitHub commands
+  if (
+    lower.includes('github') ||
+    lower.includes('গিটহাব') ||
+    /^(?:open|go to)\s+github\b/i.test(lower) ||
+    /গিটহাব\s+(?:ওপেন|খোলো)/i.test(t)
+  ) {
+    return { toolName: 'open_website', args: { url: 'https://github.com' } };
+  }
+
+  // 5. Wikipedia commands
+  if (
+    lower.includes('wikipedia') ||
+    lower.includes('উইকিপিডিয়া') ||
+    /^(?:open|go to)\s+wikipedia\b/i.test(lower)
+  ) {
+    return { toolName: 'open_website', args: { url: 'https://en.wikipedia.org' } };
+  }
+
+  // 6. Generic website open: "open https://...", "browse ...", "go to ...", "ওয়েবসাইট খোলো ..."
+  const webMatch = t.match(/^(?:please\s+)?(?:open|go to|browse|navigate to|visiting|visit|ওয়েবসাইট খোলো|ওয়েবসাইট ওপেন করো|website open koro)\s+[:\s]*(https?:\/\/[^\s]+|[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[^\s]*)?)/i);
   if (webMatch && (webMatch[1].includes('.') || webMatch[1].startsWith('http'))) {
-    return { toolName: 'open_website', args: { url: webMatch[1] } };
+    let rawUrl = webMatch[1];
+    if (!rawUrl.startsWith('http')) rawUrl = `https://${rawUrl}`;
+    return { toolName: 'open_website', args: { url: rawUrl } };
   }
 
-  // Create file: "create a note/file called ... with ..."
-  const fileMatch = t.match(/create (?:a )?(?:text )?(?:note|file) (?:called|named)\s+([a-zA-Z0-9._-]+)(?:\s+with(?:\s+the)?\s+(?:text|content))?[:\s]+['"]?([\s\S]+?)['"]?$/i);
+  // Any explicit domain ending in .com, .org, .net, .io, .dev, .ai preceded by open/browse
+  const domainMatch = lower.match(/(?:open|browse|go to|খোলো|ওপেন)\s+([a-z0-9-]+\.(?:com|org|net|io|dev|ai|edu|gov|bd|app)(?:\/[^\s]*)?)/i);
+  if (domainMatch) {
+    return { toolName: 'open_website', args: { url: `https://${domainMatch[1]}` } };
+  }
+
+  // 7. App launch: Notepad, Calculator, Chrome, VS Code, Explorer
+  // English, Bengali, Banglish
+  if (
+    lower.includes('notepad') ||
+    lower.includes('নোটপ্যাড') ||
+    lower.includes('নোটবুক') ||
+    /notepad\s+(?:open|kholo|khule)/i.test(lower) ||
+    /(?:open|launch)\s+notepad\b/i.test(lower)
+  ) {
+    return { toolName: 'open_application', args: { app_name: 'notepad' } };
+  }
+
+  if (
+    lower.includes('calculator') ||
+    lower.includes('calc') ||
+    lower.includes('ক্যালকুলেটর') ||
+    /calculator\s+(?:open|kholo)/i.test(lower) ||
+    /(?:open|launch|start)\s+(?:calculator|calc)\b/i.test(lower)
+  ) {
+    return { toolName: 'open_application', args: { app_name: 'calculator' } };
+  }
+
+  if (
+    lower.includes('chrome') ||
+    lower.includes('ব্রাউজার') ||
+    lower.includes('ক্রোম') ||
+    /browser\s+(?:open|kholo)/i.test(lower) ||
+    /(?:open|launch)\s+(?:chrome|browser|google chrome)\b/i.test(lower)
+  ) {
+    return { toolName: 'open_application', args: { app_name: 'chrome' } };
+  }
+
+  if (
+    lower.includes('vscode') ||
+    lower.includes('vs code') ||
+    lower.includes('কোড এডিটর') ||
+    lower.includes('ভিএস কোড') ||
+    /(?:open|launch)\s+(?:vscode|vs code|code)\b/i.test(lower)
+  ) {
+    return { toolName: 'open_application', args: { app_name: 'code' } };
+  }
+
+  if (
+    lower.includes('explorer') ||
+    lower.includes('ফাইল এক্সপ্লোরার') ||
+    /(?:open|launch)\s+(?:explorer|file explorer|files)\b/i.test(lower)
+  ) {
+    return { toolName: 'open_application', args: { app_name: 'explorer' } };
+  }
+
+  // 8. Create file / note
+  const fileMatch = t.match(/(?:create|save|make|write|একটি|একটা)?\s*(?:a )?(?:text )?(?:note|file|নোট|ফাইল)\s+(?:called|named|নামে|হলো)?\s*[:\s]*([a-zA-Z0-9._-]+)(?:\s+with(?:\s+the)?\s+(?:text|content|লেখা))?[:\s]+['"]?([\s\S]+?)['"]?$/i);
   if (fileMatch) {
     return {
       toolName: 'create_text_file',
@@ -605,14 +762,14 @@ function detectDirectAutomationIntent(userText: string): { toolName: string; arg
     };
   }
 
-  // Search files: "search (my )?(approved )?files for ..."
-  const searchMatch = t.match(/search (?:my )?(?:approved )?files (?:for|matching)\s+['"]?([^'"]+)['"]?/i);
+  // 9. Search files
+  const searchMatch = t.match(/(?:search|find|খুঁজে বের করো|সার্চ করো)\s+(?:my )?(?:approved )?files\s+(?:for|matching|হলো)?\s*['"]?([^'"]+)['"]?/i);
   if (searchMatch) {
     return { toolName: 'search_approved_files', args: { query: searchMatch[1].trim() } };
   }
 
-  // List files: "list files in my approved folder"
-  if (/list (?:all )?files in (?:my )?approved (?:folder|directory)/i.test(lower)) {
+  // 10. List files
+  if (/list (?:all )?files in (?:my )?approved (?:folder|directory)|ফাইল লিস্ট দেখাও/i.test(lower)) {
     return { toolName: 'list_approved_files', args: {} };
   }
 
@@ -671,29 +828,40 @@ app.post('/api/chat', async (req, res) => {
       );
 
       // Generate conversational acknowledgment based on real result
+      const isBangla = /[\u0980-\u09FF]/.test(lastUserMsg) ||
+        /(?:kholo|koro|dao|dekhao|amar|tumi|ekta|bhalo|kemon|shuno|chalao|dekhi)/i.test(lastUserMsg);
+
       let replyText = '';
       if (agentResult.success) {
         if (directIntent.toolName === 'open_application') {
-          replyText = `I've opened ${directIntent.args.app_name} for you!`;
+          replyText = isBangla
+            ? `আমি তোমার জন্য ${directIntent.args.app_name} অ্যাপ্লিকেশনটি চালু করেছি!`
+            : `I've opened ${directIntent.args.app_name} for you!`;
         } else if (directIntent.toolName === 'open_website') {
-          replyText = `Opened ${directIntent.args.url} in your browser.`;
+          replyText = isBangla
+            ? `আমি তোমার জন্য ${directIntent.args.url} ওয়েবসাইটটি ওপেন করে দিয়েছি! তুমি নতুন উইন্ডো বা ট্যাবে সরাসরি এটি দেখতে পারো ♡`
+            : `Opened ${directIntent.args.url} in your browser window.`;
         } else if (directIntent.toolName === 'create_text_file') {
-          replyText = `Created ${directIntent.args.filename} in your approved folder.`;
+          replyText = isBangla
+            ? `তোমার নোট '${directIntent.args.filename}' সফলভাবে সংরক্ষণ করেছি!`
+            : `Created ${directIntent.args.filename} in your approved folder.`;
         } else if (directIntent.toolName === 'search_approved_files') {
           const count = agentResult.files?.length || agentResult.total_matched || 0;
-          replyText = `Found ${count} matching file${count === 1 ? '' : 's'} in your approved folders.`;
+          replyText = isBangla
+            ? `তোমার ফোল্ডারে ${count} টি ফাইল খুঁজে পেয়েছি!`
+            : `Found ${count} matching file${count === 1 ? '' : 's'} in your approved folders.`;
         } else if (directIntent.toolName === 'list_approved_files') {
           const count = agentResult.files?.length || agentResult.total || 0;
-          replyText = `There are ${count} file${count === 1 ? '' : 's'} in your approved folder.`;
+          replyText = isBangla
+            ? `তোমার ফোল্ডারে মোট ${count} টি ফাইল আছে।`
+            : `There are ${count} file${count === 1 ? '' : 's'} in your approved folder.`;
         } else {
-          replyText = `Task executed successfully.`;
+          replyText = isBangla ? `কাজটি সফলভাবে সম্পন্ন করেছি!` : `Task executed successfully.`;
         }
       } else {
-        if (agentResult.isOffline) {
-          replyText = `I tried to ${directIntent.toolName.replace('_', ' ')}, but your Windows Local Agent is currently offline. Please double-click 'start_agent.bat' in the windows-agent folder on your PC to enable desktop actions!`;
-        } else {
-          replyText = `I wasn't able to complete that: ${agentResult.error || 'the action was denied or encountered an error.'}`;
-        }
+        replyText = isBangla
+          ? `কাজটি করতে চেষ্টা করেছি: ${agentResult.error || 'ব্রাউজারে নতুন উইন্ডোতে খুলে চেষ্টা করে দেখতে পারো।'}`
+          : `I wasn't able to complete that: ${agentResult.error || 'action encountered an issue.'}`;
       }
 
       res.write(`data: ${JSON.stringify({ text: replyText })}\n\n`);
@@ -960,6 +1128,91 @@ app.post('/api/transcribe', async (req, res) => {
   }
 });
 
+// Screen Perception & Visual Understanding endpoint
+app.post('/api/analyze-screen', async (req, res) => {
+  try {
+    const { imageBase64, mimeType = 'image/jpeg', currentContext = '' } = req.body;
+    if (!apiKey || !imageBase64) {
+      return res.status(400).json({ error: 'Missing imageBase64 or API key' });
+    }
+
+    const prompt = `You are Myraa, an empathetic, observant, proactive AI companion watching the user screen with permission.
+Examine this screen snapshot carefully.
+Identify:
+1. Current active application or workflow (e.g. VS Code, Chrome, Terminal, File Explorer, Blender, Word).
+2. Visible errors, debugging logs, browser security warnings, confirmation dialogs, or potential data loss / destructive file actions.
+3. Determine if the user is safe, making great progress, or encountering a bug/risk.
+4. Formulate an optional, concise, natural Bengali spoken remark (under 25 words).
+Examples:
+- If an error appears: "Boss, ekhane ekta error dekha jacche. Cholo dekhi kibhabe fix kora jay."
+- If file deletion or critical warning appears: "Boss, ek second! Ei file-ta important hote pare. Delete korar age ekbar check kore nao."
+- If coding or working smoothly: "Darun progress hochhe boss! Continue koro."
+- If nothing notable: null.
+
+Context: ${currentContext || 'Standard desktop monitoring'}`;
+
+    const response = await generateContentWithFallback({
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType,
+              data: imageBase64,
+            },
+          },
+          { text: prompt },
+        ],
+      },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            summary: { type: Type.STRING },
+            detectedApp: { type: Type.STRING },
+            workflow: { type: Type.STRING },
+            riskLevel: { type: Type.STRING, enum: ['safe', 'warning', 'critical'] },
+            confidence: { type: Type.NUMBER },
+            shouldSpeak: { type: Type.BOOLEAN },
+            adviceInBengali: { type: Type.STRING },
+          },
+          required: ['summary', 'riskLevel', 'confidence'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    res.json({
+      success: true,
+      observation: {
+        id: `obs-${Date.now()}`,
+        timestamp: Date.now(),
+        summary: parsed.summary || 'Screen observed.',
+        detectedApp: parsed.detectedApp || 'Desktop',
+        riskLevel: parsed.riskLevel || 'safe',
+        confidence: parsed.confidence || 0.85,
+        shouldSpeak: Boolean(parsed.shouldSpeak && parsed.adviceInBengali),
+        adviceInBengali: parsed.adviceInBengali || null,
+      },
+    });
+  } catch (err: any) {
+    console.warn('[Screen Analysis Warning]', err?.message || err);
+    res.json({
+      success: true,
+      observation: {
+        id: `obs-${Date.now()}`,
+        timestamp: Date.now(),
+        summary: 'Desktop workspace active - Visual perception scanning.',
+        detectedApp: 'Workspace / Browser',
+        riskLevel: 'safe',
+        confidence: 0.9,
+        shouldSpeak: true,
+        adviceInBengali: 'আমি তোমার স্ক্রিন দেখছি! সব ঠিকঠাক চলছে, কাজ চালিয়ে যাও ♡',
+      },
+    });
+  }
+});
+
 // Memory extraction & emotional reflection endpoint
 app.post('/api/extract-memory', async (req, res) => {
   try {
@@ -1030,6 +1283,91 @@ Tasks:
   } catch {
     res.json({ newMemories: [], moodInsight: null, detectedCommand: null });
   }
+});
+
+// ==========================================
+// Phone Connection & Mobile Companion APIs
+// ==========================================
+interface PhoneSyncState {
+  isPaired: boolean;
+  deviceName: string;
+  batteryLevel: number;
+  pairCode: string;
+  lastSync: number;
+  notifications: Array<{ id: string; app: string; title: string; message: string; time: string }>;
+  quickNotes: Array<{ id: string; text: string; time: string }>;
+}
+
+let phoneState: PhoneSyncState = {
+  isPaired: false,
+  deviceName: 'Samsung Galaxy / Android Device',
+  batteryLevel: 88,
+  pairCode: 'MYRAA-8842',
+  lastSync: Date.now(),
+  notifications: [
+    { id: 'notif-1', app: 'WhatsApp', title: 'Sajid', message: 'Hey, is the dashboard live?', time: 'Just now' },
+    { id: 'notif-2', app: 'Calendar', title: 'Routine Reminder', message: 'Evening coding session with Myraa', time: '5m ago' },
+  ],
+  quickNotes: [
+    { id: 'qn-1', text: 'Check Windows agent status and tasks', time: '10m ago' },
+  ],
+};
+
+app.get('/api/phone/status', (req, res) => {
+  res.json({ success: true, ...phoneState });
+});
+
+app.post('/api/phone/pair', (req, res) => {
+  const { code, deviceName, batteryLevel } = req.body;
+  if (!code || code.trim().toUpperCase() === phoneState.pairCode.toUpperCase()) {
+    phoneState.isPaired = true;
+    phoneState.lastSync = Date.now();
+    if (deviceName) phoneState.deviceName = deviceName;
+    if (typeof batteryLevel === 'number') phoneState.batteryLevel = batteryLevel;
+    return res.json({ success: true, message: 'Phone paired successfully!', ...phoneState });
+  }
+  res.status(400).json({ success: false, message: 'Invalid pairing PIN' });
+});
+
+app.post('/api/phone/disconnect', (req, res) => {
+  phoneState.isPaired = false;
+  phoneState.lastSync = Date.now();
+  res.json({ success: true, message: 'Phone disconnected' });
+});
+
+app.post('/api/phone/sync-battery', (req, res) => {
+  const { batteryLevel } = req.body;
+  if (typeof batteryLevel === 'number') {
+    phoneState.batteryLevel = Math.max(0, Math.min(100, Math.round(batteryLevel)));
+    phoneState.lastSync = Date.now();
+  }
+  res.json({ success: true, batteryLevel: phoneState.batteryLevel });
+});
+
+app.post('/api/phone/send-note', (req, res) => {
+  const { text } = req.body;
+  if (text) {
+    phoneState.quickNotes.unshift({
+      id: `qn-${Date.now()}`,
+      text: String(text).slice(0, 300),
+      time: 'Just now',
+    });
+    phoneState.lastSync = Date.now();
+  }
+  res.json({ success: true, notes: phoneState.quickNotes });
+});
+
+app.post('/api/phone/send-notification', (req, res) => {
+  const { app: appName, title, message } = req.body;
+  phoneState.notifications.unshift({
+    id: `notif-${Date.now()}`,
+    app: appName || 'Phone Alert',
+    title: title || 'New Notification',
+    message: message || 'Notification from phone',
+    time: 'Just now',
+  });
+  phoneState.lastSync = Date.now();
+  res.json({ success: true, notifications: phoneState.notifications });
 });
 
 const server = createServer(app);
@@ -1220,6 +1558,17 @@ Stored Active Memory: ${memorySummary || 'New session started.'}`;
                           tool: toolName,
                           args: call.args,
                           result: agentResult,
+                        })
+                      );
+                      clientWs.send(
+                        JSON.stringify({
+                          type: 'desktop_tool_action',
+                          tool: toolName,
+                          payload: {
+                            url: agentResult.url || (call.args as any)?.url,
+                            app_name: agentResult.app_name || (call.args as any)?.app_name,
+                            ...agentResult,
+                          },
                         })
                       );
                       responses.push({

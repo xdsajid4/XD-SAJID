@@ -168,6 +168,41 @@ export class GaplessAudioPlayer {
     }
   }
 
+  public async queueAudioData(arrayBuffer: ArrayBuffer): Promise<void> {
+    this.init();
+    if (!this.ctx || !this.gainNode) return;
+
+    try {
+      // Clone buffer because decodeAudioData detaches the buffer in some browsers
+      const cloned = arrayBuffer.slice(0);
+      const audioBuffer = await this.ctx.decodeAudioData(cloned);
+      const source = this.ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.playbackRate.setValueAtTime(this.playbackRate, this.ctx.currentTime);
+      source.connect(this.gainNode);
+
+      const currentTime = this.ctx.currentTime;
+      const startTime = Math.max(currentTime + 0.02, this.nextStartTime);
+      source.start(startTime);
+      this.nextStartTime = startTime + audioBuffer.duration / this.playbackRate;
+
+      this.activeSources.push(source);
+      this.onSpeakingChange?.(true);
+
+      source.onended = () => {
+        const idx = this.activeSources.indexOf(source);
+        if (idx !== -1) {
+          this.activeSources.splice(idx, 1);
+        }
+        if (this.activeSources.length === 0) {
+          this.onSpeakingChange?.(false);
+        }
+      };
+    } catch (e) {
+      console.warn('Error decoding or queuing audio data:', e);
+    }
+  }
+
   public interrupt() {
     if (!this.ctx) return;
     try {

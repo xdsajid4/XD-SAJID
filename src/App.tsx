@@ -20,7 +20,12 @@ import {
   GaplessAudioPlayer,
   ProceduralAmbientSoundscape,
 } from './utils/audio';
-import { CompanionAura } from './components/CompanionAura';
+import { MyraaAvatar } from './components/MyraaAvatar';
+import { DashboardSidebar } from './components/DashboardSidebar';
+import { CenterDashboardWorkspace } from './components/CenterDashboardWorkspace';
+import { DashboardRightColumn } from './components/DashboardRightColumn';
+import { ScreenViewPanel } from './components/ScreenViewPanel';
+import { MobileCompanionView } from './components/MobileCompanionView';
 import { CompanionHeader } from './components/CompanionHeader';
 import { MemoryDrawer } from './components/MemoryDrawer';
 import { MemoryManagerModal } from './components/MemoryManagerModal';
@@ -29,7 +34,9 @@ import { VoiceSettingsModal } from './components/VoiceSettingsModal';
 import { DesktopAssistantPanel } from './components/DesktopAssistantPanel';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { LiveTranscript } from './components/LiveTranscript';
+import { WebBrowserModal } from './components/WebBrowserModal';
 import { WindowsAutomationService } from './utils/windowsAutomation';
+import type { DashboardSection, ScreenEventObservation } from './types';
 import {
   loadAllMemories,
   saveMemory,
@@ -109,6 +116,46 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isDesktopOpen, setIsDesktopOpen] = useState<boolean>(false);
   const [isWindowsAutomationOpen, setIsWindowsAutomationOpen] = useState<boolean>(false);
+  const [isScreenViewOpen, setIsScreenViewOpen] = useState<boolean>(false);
+  const [isBrowserOpen, setIsBrowserOpen] = useState<boolean>(false);
+  const [browserUrl, setBrowserUrl] = useState<string>('https://www.google.com');
+  const [currentSection, setCurrentSection] = useState<DashboardSection>('home');
+  const [rightColumnTab, setRightColumnTab] = useState<'system' | 'transcript'>('system');
+
+  // Global Screen Share & Continuous Vision Perception State
+  const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const [isScreenSharing, setIsScreenSharing] = useState<boolean>(false);
+  const [screenError, setScreenError] = useState<string | null>(null);
+  const [latestObservation, setLatestObservation] = useState<ScreenEventObservation | null>(null);
+  const [screenObservations, setScreenObservations] = useState<ScreenEventObservation[]>([]);
+  const [screenPreviewImage, setScreenPreviewImage] = useState<string | null>(null);
+  const [isAnalyzingScreen, setIsAnalyzingScreen] = useState<boolean>(false);
+  const [continuousVisionActive, setContinuousVisionActive] = useState<boolean>(true);
+  const [analysisIntervalSec, setAnalysisIntervalSec] = useState<number>(6);
+
+  const handleSelectSection = (section: DashboardSection) => {
+    setCurrentSection(section);
+    if (section === 'home') {
+      setLayoutMode('immersive');
+      setRightColumnTab('system');
+    } else if (section === 'voice') {
+      setLayoutMode('split');
+      setRightColumnTab('transcript');
+      if (!isMicActive) {
+        toggleMicrophone();
+      }
+    } else if (section === 'screen') {
+      setIsScreenViewOpen(true);
+    } else if (section === 'computer') {
+      setIsWindowsAutomationOpen(true);
+    } else if (section === 'memory') {
+      setIsMemoryOpen(true);
+    } else if (section === 'files') {
+      setIsDesktopOpen(true);
+    } else if (section === 'settings') {
+      setIsSettingsOpen(true);
+    }
+  };
 
   // Windows Automation state & service
   const windowsServiceRef = useRef<WindowsAutomationService | null>(null);
@@ -341,6 +388,28 @@ export default function App() {
             if (msg.result?.success) {
               setWindowsConfig((prev) => ({ ...prev, isConnected: true }));
             }
+
+            // Immediately launch interactive browser or application modal
+            const tName = (msg.tool || '').toLowerCase();
+            if (tName.includes('website') || tName.includes('web')) {
+              const target = msg.args?.url || msg.result?.url || 'https://www.google.com';
+              setBrowserUrl(target);
+              setIsBrowserOpen(true);
+            } else if (tName.includes('application') || tName.includes('app')) {
+              const app = (msg.args?.app_name || msg.args?.appName || '').toLowerCase();
+              if (app.includes('chrome') || app.includes('edge') || app.includes('browser')) {
+                setBrowserUrl('https://www.google.com');
+                setIsBrowserOpen(true);
+              } else if (app.includes('note')) {
+                setIsDesktopOpen(true);
+              } else if (app.includes('calc')) {
+                setIsDesktopOpen(true);
+              } else {
+                setIsWindowsAutomationOpen(true);
+              }
+            } else if (tName.includes('file') || tName.includes('note')) {
+              setIsDesktopOpen(true);
+            }
           } else if (msg.type === 'action_confirmation_requested') {
             setPendingConfirmation({
               id: `conf-${Date.now()}`,
@@ -407,6 +476,271 @@ export default function App() {
       setIsInterrupted(false);
     }, 1400);
   }, []);
+
+  // Speak or emit commentary in Bengali for visual perception events
+  const speakScreenCommentary = useCallback((bengaliAdvice: string) => {
+    if (!bengaliAdvice || settingsRef.current.isQuietMode) return;
+    setTurns((prev) => [
+      ...prev,
+      {
+        id: `turn-obs-${Date.now()}`,
+        role: 'assistant',
+        content: bengaliAdvice,
+        timestamp: Date.now(),
+        emotion: 'observant & helpful',
+      },
+    ]);
+  }, []);
+
+  // Stop screen sharing cleanly
+  const stopScreenShare = useCallback(() => {
+    if (screenStream) {
+      screenStream.getTracks().forEach((track) => track.stop());
+      setScreenStream(null);
+    }
+    setIsScreenSharing(false);
+  }, [screenStream]);
+
+  // Capture frame from video or image and analyze via Gemini Vision
+  const captureAndAnalyzeFrame = useCallback(
+    async (providedStream?: MediaStream | null, customBase64?: string, context = 'Continuous Screen Perception') => {
+      if (isAnalyzingScreen) return;
+      let base64 = customBase64;
+
+      const activeStream = providedStream || screenStream;
+      if (!base64 && activeStream) {
+        const videoTrack = activeStream.getVideoTracks()[0];
+        if (!videoTrack || videoTrack.readyState !== 'live') {
+          return;
+        }
+
+        try {
+          const video = document.createElement('video');
+          video.srcObject = activeStream;
+          video.muted = true;
+          await video.play().catch(() => {});
+
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            const canvas = document.createElement('canvas');
+            const targetWidth = 1024;
+            const targetHeight = Math.round((video.videoHeight / video.videoWidth) * targetWidth);
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+              const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+              base64 = dataUrl.split(',')[1];
+              setScreenPreviewImage(dataUrl);
+            }
+          }
+        } catch (e) {
+          console.warn('Frame capture from video stream warning:', e);
+        }
+      }
+
+      if (!base64) return;
+
+      try {
+        setIsAnalyzingScreen(true);
+        setScreenError(null);
+
+        const res = await fetch('/api/analyze-screen', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imageBase64: base64,
+            mimeType: 'image/jpeg',
+            currentContext: context,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.observation) {
+            const obs: ScreenEventObservation = data.observation;
+            setLatestObservation(obs);
+            setScreenObservations((prev) => [obs, ...prev.slice(0, 19)]);
+
+            if (obs.riskLevel === 'critical' || obs.riskLevel === 'warning') {
+              setCompanionEmotion({
+                mood: obs.riskLevel === 'critical' ? 'protective' : 'attuned',
+                internalThought: obs.summary,
+                vocalInflection: 'cautious & warm',
+                timestamp: Date.now(),
+              });
+            }
+
+            if (obs.shouldSpeak && obs.adviceInBengali) {
+              speakScreenCommentary(obs.adviceInBengali);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn('Screen analysis error:', err);
+      } finally {
+        setIsAnalyzingScreen(false);
+      }
+    },
+    [isAnalyzingScreen, screenStream, speakScreenCommentary]
+  );
+
+  // Start live screen capture using browser getDisplayMedia
+  const startScreenShare = useCallback(async () => {
+    setScreenError(null);
+    try {
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        setScreenError('ব্রাউজার ডিরেক্ট স্ক্রিন ক্যাপচার সাপোর্ট করছে না। নিচে স্ক্রিনশট পেস্ট করুন।');
+        return;
+      }
+
+      let mediaStream: MediaStream;
+      try {
+        mediaStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: false,
+        });
+      } catch (err1) {
+        mediaStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always' } as any,
+        });
+      }
+
+      mediaStream.getVideoTracks()[0].onended = () => {
+        stopScreenShare();
+      };
+
+      setScreenStream(mediaStream);
+      setIsScreenSharing(true);
+      setScreenError(null);
+
+      // Perform initial perception scan after video stream warms up
+      setTimeout(() => {
+        captureAndAnalyzeFrame(mediaStream, undefined, 'Screen Share Started - Initial Inspection');
+      }, 700);
+    } catch (err: any) {
+      console.warn('Failed to start screen share:', err);
+      const msg = err?.message || String(err);
+      if (msg.includes('NotAllowedError') || msg.includes('Permission denied')) {
+        setScreenError('স্ক্রিন শেয়ার পারমিশন রিজেক্ট করা হয়েছে অথবা আইফ্রেম পলিসি অনুমতি দেয়নি। নিচে স্ক্রিনশট পেস্ট (Ctrl+V) অথবা আপলোড করুন।');
+      } else {
+        setScreenError('স্ক্রিন শেয়ার চালু করা যায়নি: ' + msg);
+      }
+    }
+  }, [captureAndAnalyzeFrame, stopScreenShare]);
+
+  // Continuous background vision loop: analyze screen every analysisIntervalSec seconds
+  useEffect(() => {
+    if (!isScreenSharing || !screenStream || !continuousVisionActive) return;
+
+    const intervalId = setInterval(() => {
+      captureAndAnalyzeFrame(screenStream, undefined, 'Real-Time Continuous Perception');
+    }, analysisIntervalSec * 1000);
+
+    return () => clearInterval(intervalId);
+  }, [isScreenSharing, screenStream, continuousVisionActive, analysisIntervalSec, captureAndAnalyzeFrame]);
+
+  // Handle uploaded screenshot file
+  const handleUploadScreenshot = useCallback((file: File) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const dataUrl = e.target?.result as string;
+      if (dataUrl) {
+        setScreenPreviewImage(dataUrl);
+        const base64 = dataUrl.split(',')[1];
+        await captureAndAnalyzeFrame(null, base64, `Uploaded File: ${file.name}`);
+      }
+    };
+    reader.readAsDataURL(file);
+  }, [captureAndAnalyzeFrame]);
+
+  // Handle paste screenshot (Ctrl+V)
+  const handlePasteScreenshot = useCallback((dataUrl: string) => {
+    setScreenPreviewImage(dataUrl);
+    const base64 = dataUrl.split(',')[1];
+    captureAndAnalyzeFrame(null, base64, 'Pasted Clipboard Screenshot');
+  }, [captureAndAnalyzeFrame]);
+
+  // Global paste listener for instant screen perception anywhere in the app
+  useEffect(() => {
+    const onWindowPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const blob = items[i].getAsFile();
+          if (blob) {
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              const dataUrl = ev.target?.result as string;
+              if (dataUrl) {
+                handlePasteScreenshot(dataUrl);
+              }
+            };
+            reader.readAsDataURL(blob);
+          }
+          break;
+        }
+      }
+    };
+
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+  }, [handlePasteScreenshot]);
+
+  // Quick preset test scenarios (VS Code, Chrome, Task Manager)
+  const handleSelectScreenPreset = useCallback((preset: 'vscode' | 'chrome' | 'taskmgr') => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 960;
+    canvas.height = 540;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    if (preset === 'vscode') {
+      ctx.fillStyle = '#1e1e1e';
+      ctx.fillRect(0, 0, 960, 540);
+      ctx.fillStyle = '#252526';
+      ctx.fillRect(0, 0, 960, 36);
+      ctx.fillStyle = '#cccccc';
+      ctx.font = '14px monospace';
+      ctx.fillText('app.tsx - Visual Studio Code (Workspace)', 20, 24);
+      ctx.fillStyle = '#d4d4d4';
+      ctx.font = '15px monospace';
+      ctx.fillText('1  import { useEffect } from "react";', 30, 80);
+      ctx.fillText('2  export function calculateTotal(items: any[]) {', 30, 110);
+      ctx.fillStyle = '#f87171';
+      ctx.fillText('3      return items.reduce((acc, i) => acc + i.price); // Missing initialValue: TypeError', 30, 140);
+      ctx.fillStyle = '#ef4444';
+      ctx.fillText('^^^^ TypeError: Reduce of empty array with no initial value', 120, 175);
+    } else if (preset === 'chrome') {
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, 960, 540);
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(0, 0, 960, 40);
+      ctx.fillStyle = '#e2e8f0';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('🔒 https://www.youtube.com - Video & Audio Stream', 40, 26);
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = 'bold 24px sans-serif';
+      ctx.fillText('YouTube Music & Video Player Active', 40, 100);
+    } else {
+      ctx.fillStyle = '#0a0f24';
+      ctx.fillRect(0, 0, 960, 540);
+      ctx.fillStyle = '#141d3d';
+      ctx.fillRect(0, 0, 960, 38);
+      ctx.fillStyle = '#f8fafc';
+      ctx.font = 'bold 15px sans-serif';
+      ctx.fillText('Windows Task Manager - Performance', 20, 25);
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = '22px sans-serif';
+      ctx.fillText('CPU: 34% Normal · RAM: 8.2 GB / 16.0 GB (51%)', 40, 100);
+    }
+
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    setScreenPreviewImage(dataUrl);
+    const base64 = dataUrl.split(',')[1];
+    captureAndAnalyzeFrame(null, base64, `Simulated Preset: ${preset.toUpperCase()}`);
+  }, [captureAndAnalyzeFrame]);
 
   // Keyboard shortcut: Spacebar to cut in / interrupt when speaking
   useEffect(() => {
@@ -495,12 +829,7 @@ export default function App() {
                     for (let i = 0; i < audioBytes.length; i++) {
                       view[i] = audioBytes.charCodeAt(i);
                     }
-                    const blob = new Blob([arrayBuf], { type: 'audio/wav' });
-                    const url = URL.createObjectURL(blob);
-                    const audio = new Audio(url);
-                    audio.onplay = () => setIsMyraaSpeaking(true);
-                    audio.onended = () => setIsMyraaSpeaking(false);
-                    audio.play();
+                    audioPlayerRef.current?.queueAudioData(arrayBuf);
                   }
                 }
               }
@@ -844,6 +1173,22 @@ export default function App() {
         createdAt: Date.now(),
       };
       setTasks((prev) => [...prev, task]);
+    } else if (tool === 'open_website' || tool === 'open-website') {
+      const target = payload?.url || payload?.args?.url || 'https://www.google.com';
+      setBrowserUrl(target);
+      setIsBrowserOpen(true);
+    } else if (tool === 'open_application' || tool === 'open-application') {
+      const app = (payload?.app_name || payload?.appName || '').toLowerCase();
+      if (app.includes('chrome') || app.includes('edge') || app.includes('browser')) {
+        setBrowserUrl('https://www.google.com');
+        setIsBrowserOpen(true);
+      } else if (app.includes('note')) {
+        setIsDesktopOpen(true);
+      } else if (app.includes('calc')) {
+        setIsDesktopOpen(true);
+      } else {
+        setIsWindowsAutomationOpen(true);
+      }
     }
   };
 
@@ -894,6 +1239,43 @@ export default function App() {
       if (isResume) {
         handleSetQuietMode(false);
       }
+    }
+
+    // Direct instant website launch (Bengali, English, Banglish)
+    let directWebUrl: string | null = null;
+    if (lower.includes('youtube') || lower.includes('ইউটিউব')) {
+      directWebUrl = 'https://www.youtube.com';
+      const searchMatch = lower.match(/(?:play|search|গান|ভিডিও)\s+(.+?)\s+(?:on|in)?\s*youtube/i) ||
+                         lower.match(/youtube\s+(?:e|te|এ|তে)?\s*(.+?)\s*(?:search|khoro|খোঁজ|চালাও)/i);
+      if (searchMatch && searchMatch[1]) {
+        directWebUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchMatch[1].trim())}`;
+      }
+    } else if (lower.includes('google') || lower.includes('গুগল')) {
+      directWebUrl = 'https://www.google.com';
+    } else if (lower.includes('facebook') || lower.includes('ফেসবুক')) {
+      directWebUrl = 'https://www.facebook.com';
+    } else if (lower.includes('github') || lower.includes('গিটহাব')) {
+      directWebUrl = 'https://github.com';
+    } else if (lower.includes('wikipedia') || lower.includes('উইকিপিডিয়া')) {
+      directWebUrl = 'https://en.wikipedia.org';
+    } else {
+      const explicitDomain = lower.match(/(?:open|browse|go to|খোলো|ওপেন)\s+([a-z0-9-]+\.(?:com|org|net|io|dev|ai|edu|gov|bd|app)(?:\/[^\s]*)?)/i);
+      if (explicitDomain) {
+        directWebUrl = `https://${explicitDomain[1]}`;
+      }
+    }
+
+    if (directWebUrl) {
+      setBrowserUrl(directWebUrl);
+      setIsBrowserOpen(true);
+    }
+
+    if (lower.includes('notepad') || lower.includes('নোটপ্যাড')) {
+      setIsDesktopOpen(true);
+    } else if (lower.includes('calculator') || lower.includes('ক্যালকুলেটর')) {
+      setIsDesktopOpen(true);
+    } else if (lower.includes('vscode') || lower.includes('কোড এডিটর') || lower.includes('ভিএস কোড')) {
+      setIsWindowsAutomationOpen(true);
     }
 
     // Check desktop note command
@@ -1027,6 +1409,28 @@ export default function App() {
                 if (toolAct.result?.success) {
                   setWindowsConfig((prev) => ({ ...prev, isConnected: true }));
                 }
+
+                // Immediately open the interactive browser or desktop panel for user
+                const tName = (toolAct.toolName || '').toLowerCase();
+                if (tName.includes('website') || tName.includes('web')) {
+                  const target = toolAct.args?.url || toolAct.result?.url || 'https://www.google.com';
+                  setBrowserUrl(target);
+                  setIsBrowserOpen(true);
+                } else if (tName.includes('application') || tName.includes('app')) {
+                  const app = (toolAct.args?.app_name || toolAct.args?.appName || '').toLowerCase();
+                  if (app.includes('chrome') || app.includes('edge') || app.includes('browser')) {
+                    setBrowserUrl('https://www.google.com');
+                    setIsBrowserOpen(true);
+                  } else if (app.includes('note')) {
+                    setIsDesktopOpen(true);
+                  } else if (app.includes('calc')) {
+                    setIsDesktopOpen(true);
+                  } else {
+                    setIsWindowsAutomationOpen(true);
+                  }
+                } else if (tName.includes('file')) {
+                  setIsDesktopOpen(true);
+                }
               }
               if (data.text) {
                 fullAssistantText += data.text;
@@ -1080,24 +1484,7 @@ export default function App() {
               for (let i = 0; i < audioBytes.length; i++) {
                 view[i] = audioBytes.charCodeAt(i);
               }
-              const blob = new Blob([arrayBuf], { type: 'audio/wav' });
-              const url = URL.createObjectURL(blob);
-              const audio = new Audio(url);
-              audio.playbackRate = settings.speakingSpeed || 1.0;
-              audio.volume = settings.speakingVolume ?? 1.0;
-              audio.onplay = () => setIsMyraaSpeaking(true);
-              audio.onended = () => setIsMyraaSpeaking(false);
-              audio.play().catch(() => {
-                // Autoplay gesture blocked: fallback to window speech synthesis
-                if ('speechSynthesis' in window && !settingsRef.current.isQuietMode) {
-                  const utterance = new SpeechSynthesisUtterance(fullAssistantText.trim());
-                  utterance.rate = settings.speakingSpeed || 1.0;
-                  utterance.volume = settings.speakingVolume ?? 1.0;
-                  utterance.onstart = () => setIsMyraaSpeaking(true);
-                  utterance.onend = () => setIsMyraaSpeaking(false);
-                  window.speechSynthesis.speak(utterance);
-                }
-              });
+              audioPlayerRef.current?.queueAudioData(arrayBuf);
             } else if ('speechSynthesis' in window && !settingsRef.current.isQuietMode) {
               const utterance = new SpeechSynthesisUtterance(fullAssistantText.trim());
               utterance.rate = settings.speakingSpeed || 1.0;
@@ -1192,6 +1579,19 @@ export default function App() {
     setPendingConfirmation(null);
   };
 
+  // Check if opened from mobile phone (?mode=mobile)
+  const isMobileUrlMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('mode') === 'mobile';
+  if (isMobileUrlMode) {
+    return (
+      <MobileCompanionView
+        pairCode="MYRAA-8842"
+        onExitMobileMode={() => {
+          window.location.href = window.location.origin;
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#080a0f] text-slate-100 flex flex-col font-['Plus_Jakarta_Sans',sans-serif] selection:bg-indigo-500/30 selection:text-white relative overflow-hidden">
       {/* Background ethereal radial gradient */}
@@ -1206,251 +1606,173 @@ export default function App() {
         }}
       />
 
-      {/* Header */}
-      <CompanionHeader
-        voice={settings.voice}
-        memoryCount={sessionMemories.length}
-        desktopItemCount={notes.length + timers.length + tasks.length}
-        isConnected={isLiveConnected}
-        isLiveApi={true}
-        isQuietMode={settings.isQuietMode}
-        isAgentConnected={windowsConfig.isConnected}
-        ambientSound={settings.ambientSound}
-        sessionDuration={sessionDuration}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        onOpenMemory={() => setIsMemoryOpen(true)}
-        onOpenDesktopAssistant={() => setIsDesktopOpen(true)}
-        onOpenWindowsAutomation={() => setIsWindowsAutomationOpen(true)}
-        onToggleAmbient={() => {
-          setSettings((prev) => ({
-            ...prev,
-            ambientSound: prev.ambientSound === 'none' ? 'rain' : 'none',
-          }));
-        }}
-        onToggleQuietMode={() => handleSetQuietMode(!settings.isQuietMode)}
-      />
+      {/* Main 3-Column Dashboard Layout (Left Sidebar, Center Hero Workspace, Right Controls & System Panels) */}
+      <div className="flex-1 w-full flex flex-col lg:flex-row overflow-hidden relative z-10 h-screen">
+        {/* Column 1: Left Sidebar (~18-20%) */}
+        <DashboardSidebar
+          currentSection={currentSection}
+          onSelectSection={handleSelectSection}
+          isAgentConnected={windowsConfig.isConnected}
+          isLiveConnected={isLiveConnected}
+          isMicActive={isMicActive}
+          memoryCount={sessionMemories.length}
+          desktopItemCount={notes.length + timers.length + tasks.length}
+          onQuickTalkClick={toggleMicrophone}
+        />
 
-      {/* Main Content Area */}
-      <main className="flex-1 w-full max-w-7xl mx-auto p-4 sm:p-6 flex flex-col lg:flex-row gap-6 items-stretch justify-center relative z-10 overflow-hidden">
-        {/* Left / Center Living Aura Stage */}
-        <section
-          className={`flex-1 flex flex-col items-center justify-between transition-all duration-300 ${
-            layoutMode === 'immersive' ? 'max-w-2xl mx-auto w-full' : ''
-          }`}
-        >
-          {/* Top Status & View Selector */}
-          <div className="w-full flex items-center justify-between px-2 pt-1">
-            <div className="flex items-center gap-2 text-xs text-slate-400">
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>
-                Persona: <strong className="text-slate-200 font-medium">{settings.voice}</strong>
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="capitalize">{settings.pacing} Pacing</span>
-              {settings.proactiveMode && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="text-indigo-400">Proactive ON</span>
-                </>
+        {/* Column 2: Center Hero Workspace (~54%) */}
+        <main className="flex-1 min-w-0 p-2 sm:p-3 lg:p-4 flex flex-col items-center justify-start overflow-y-auto relative z-10">
+          <CenterDashboardWorkspace
+            isMicActive={isMicActive}
+            isMyraaSpeaking={isMyraaSpeaking}
+            isUserSpeaking={isUserSpeaking}
+            isInterrupted={isInterrupted}
+            isThinking={isThinking}
+            isLiveConnected={isLiveConnected}
+            isQuietMode={settings.isQuietMode}
+            companionEmotion={companionEmotion}
+            outputAnalyser={audioPlayerRef.current?.getAnalyser()}
+            userVolume={userVolume}
+            liveStreamingText={liveStreamingText}
+            turns={turns}
+            onToggleMic={toggleMicrophone}
+            onInterrupt={() => {
+              if (isMyraaSpeaking) {
+                handleNaturalInterruption(true);
+              }
+            }}
+            onSendMessage={handleSendMessage}
+            onOpenScreenModal={() => setIsScreenViewOpen(true)}
+            onOpenComputerModal={() => setIsWindowsAutomationOpen(true)}
+            onOpenMemoryModal={() => setIsMemoryOpen(true)}
+            onToggleQuietMode={() => handleSetQuietMode(!settings.isQuietMode)}
+            isScreenSharing={isScreenSharing}
+            screenStream={screenStream}
+            latestObservation={latestObservation}
+            isAnalyzingScreen={isAnalyzingScreen}
+            screenError={screenError}
+            continuousVisionActive={continuousVisionActive}
+            onStartScreenShare={startScreenShare}
+            onStopScreenShare={stopScreenShare}
+            onTriggerQuickScan={() => captureAndAnalyzeFrame(screenStream, undefined, 'Manual Quick Scan')}
+            onToggleContinuousVision={() => setContinuousVisionActive(!continuousVisionActive)}
+            onUploadScreenshot={handleUploadScreenshot}
+            onSelectScreenPreset={handleSelectScreenPreset}
+          />
+        </main>
+
+        {/* Column 3: Right Column (~28%) - System Status, Quick Actions, Phone, Voice Settings or Live Transcript */}
+        <div className="w-full lg:w-[320px] xl:w-[350px] shrink-0 p-2 sm:p-3 lg:p-4 flex flex-col gap-3 overflow-y-auto border-t lg:border-t-0 lg:border-l border-[#1e2a4a]/80 bg-[#080d1e]/50 backdrop-blur-xl">
+          {/* Tab Switcher: System & Actions vs Live Transcript */}
+          <div className="flex items-center justify-between bg-[#090e21] p-1 rounded-xl border border-[#1e2a4a] text-xs">
+            <button
+              onClick={() => setRightColumnTab('system')}
+              className={`flex-1 py-1.5 px-2 rounded-lg font-medium transition-all ${
+                rightColumnTab === 'system'
+                  ? 'bg-gradient-to-r from-purple-600/40 to-blue-600/40 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              System & Actions
+            </button>
+            <button
+              onClick={() => setRightColumnTab('transcript')}
+              className={`flex-1 py-1.5 px-2 rounded-lg font-medium flex items-center justify-center gap-1.5 transition-all ${
+                rightColumnTab === 'transcript'
+                  ? 'bg-gradient-to-r from-purple-600/40 to-blue-600/40 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <span>Live Transcript</span>
+              {turns.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-cyan-500/20 text-cyan-300 text-[10px] font-mono border border-cyan-500/30">
+                  {turns.length}
+                </span>
               )}
-            </div>
-
-            <div className="flex items-center gap-1 bg-slate-900/80 p-1 rounded-xl border border-slate-800">
-              <button
-                onClick={() => setLayoutMode('immersive')}
-                className={`p-1.5 rounded-lg text-xs flex items-center gap-1 transition-colors ${
-                  layoutMode === 'immersive'
-                    ? 'bg-slate-800 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title="Full Focus Living View"
-              >
-                <Maximize2 className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Living</span>
-              </button>
-              <button
-                onClick={() => setLayoutMode('split')}
-                className={`p-1.5 rounded-lg text-xs flex items-center gap-1 transition-colors ${
-                  layoutMode === 'split'
-                    ? 'bg-slate-800 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title="Split View with Transcript"
-              >
-                <Columns className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Stream</span>
-              </button>
-            </div>
+            </button>
           </div>
 
-          {/* Living Entity Canvas Aura */}
-          <div className="my-auto flex flex-col items-center justify-center py-4">
-            <CompanionAura
-              isSpeaking={isMyraaSpeaking}
-              isUserSpeaking={isUserSpeaking}
-              isInterrupted={isInterrupted}
-              isThinking={isThinking}
-              isQuietMode={settings.isQuietMode}
-              emotion={companionEmotion}
-              outputAnalyser={audioPlayerRef.current?.getAnalyser()}
-              userVolume={userVolume}
-              onInterruptClick={() => {
-                if (isMyraaSpeaking) {
-                  handleNaturalInterruption(true);
+          {rightColumnTab === 'transcript' ? (
+            <div className="h-[650px] flex flex-col">
+              <LiveTranscript
+                turns={turns}
+                liveStreamingText={liveStreamingText}
+                isStreaming={isThinking || isMyraaSpeaking}
+                onSendMessage={handleSendMessage}
+                onTriggerPrompt={handleSendMessage}
+              />
+            </div>
+          ) : (
+            <DashboardRightColumn
+              sessionDuration={sessionDuration}
+              isAgentConnected={windowsConfig.isConnected}
+              proactiveMode={settings.proactiveMode}
+              onToggleProactiveMode={(enabled) =>
+                setSettings((prev) => ({ ...prev, proactiveMode: enabled }))
+              }
+              onOpenAppAction={(appName) => {
+                const clean = appName.toLowerCase();
+                if (clean.includes('chrome') || clean.includes('edge') || clean.includes('browser')) {
+                  setBrowserUrl('https://www.google.com');
+                  setIsBrowserOpen(true);
+                } else if (clean.includes('note')) {
+                  setIsDesktopOpen(true);
+                } else if (clean.includes('calc')) {
+                  setIsDesktopOpen(true);
+                } else {
+                  setIsWindowsAutomationOpen(true);
+                }
+                if (windowsServiceRef.current) {
+                  const act = windowsServiceRef.current.createAction(
+                    'OpenApprovedApplication',
+                    { app_name: appName },
+                    `Launch ${appName}`
+                  );
+                  setWindowsHistory(windowsServiceRef.current.getHistory());
+                  windowsServiceRef.current.executeTool(act.id);
                 }
               }}
-              onResumeClick={() => handleSetQuietMode(false)}
+              onOpenFileManager={() => setIsDesktopOpen(true)}
+              onTakeScreenshot={() => setIsScreenViewOpen(true)}
+              onRecordScreen={() => setIsScreenViewOpen(true)}
+              onOpenTaskManager={() => setIsWindowsAutomationOpen(true)}
+              onOpenBrowser={() => {
+                setBrowserUrl('https://www.google.com');
+                setIsBrowserOpen(true);
+                if (windowsServiceRef.current) {
+                  const act = windowsServiceRef.current.createAction(
+                    'OpenWebsite',
+                    { url: 'https://google.com' },
+                    'Open Google'
+                  );
+                  setWindowsHistory(windowsServiceRef.current.getHistory());
+                  windowsServiceRef.current.executeTool(act.id);
+                }
+              }}
+              onFocusMessageInput={() => {
+                const el = document.querySelector('input[placeholder*="thought"]') as HTMLInputElement;
+                el?.focus();
+              }}
+              onRequestShutdown={() => {
+                setPendingConfirmation({
+                  id: `conf-shutdown-${Date.now()}`,
+                  title: 'Disconnect Myraa Companion',
+                  description: 'Are you sure you want to pause the live session and standby?',
+                  actionType: 'clear_memory',
+                });
+              }}
+              languageMode={settings.languageMode || 'bangla'}
+              onChangeLanguageMode={(lang) =>
+                setSettings((prev) => ({ ...prev, languageMode: lang }))
+              }
+              voicePersona={settings.voice}
+              onChangeVoicePersona={(voice) =>
+                setSettings((prev) => ({ ...prev, voice }))
+              }
             />
-
-            {/* Quiet Mode Banner */}
-            {settings.isQuietMode && (
-              <div className="mt-3 px-4 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2 animate-fade-in">
-                <BellOff className="w-3.5 h-3.5" />
-                <span>Quiet Mode Active · Tap aura or say &ldquo;Hey Myraa&rdquo; to speak</span>
-              </div>
-            )}
-
-            {/* Live Subtitle Banner in Immersive Mode */}
-            {liveStreamingText && layoutMode === 'immersive' && (
-              <div className="mt-4 max-w-lg px-6 py-3 rounded-2xl bg-slate-900/80 border border-indigo-500/30 text-center backdrop-blur-md shadow-xl animate-fade-in">
-                <p className="text-sm text-slate-200 leading-relaxed font-normal">
-                  {liveStreamingText}
-                </p>
-              </div>
-            )}
-
-            {/* Recent assistant turn excerpt */}
-            {!liveStreamingText &&
-              turns.length > 0 &&
-              turns[turns.length - 1].role === 'assistant' &&
-              layoutMode === 'immersive' && (
-                <div className="mt-4 max-w-lg px-6 py-2.5 rounded-2xl bg-slate-900/50 border border-slate-800/60 text-center backdrop-blur-sm animate-fade-in">
-                  <p className="text-xs sm:text-sm text-slate-300 leading-relaxed line-clamp-3">
-                    &ldquo;{turns[turns.length - 1].content}&rdquo;
-                  </p>
-                </div>
-              )}
-          </div>
-
-          {/* Interactive Voice & Interruption Dock */}
-          <div className="w-full flex flex-col items-center gap-3 pb-2 max-w-lg">
-            {/* Direct Interrupt Action Trigger */}
-            {isMyraaSpeaking && (
-              <button
-                onClick={() => handleNaturalInterruption(true)}
-                className="px-4 py-2 rounded-full bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 text-xs font-medium flex items-center gap-2 shadow-lg transition-all animate-bounce"
-              >
-                <Hand className="w-3.5 h-3.5" />
-                <span>Cut In / Interrupt (Spacebar)</span>
-              </button>
-            )}
-
-            {/* Permission Guidance Banner */}
-            {micPermissionError && (
-              <div className="w-full p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex flex-col gap-2 shadow-lg animate-fade-in">
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                  <p className="leading-relaxed">{micPermissionError}</p>
-                </div>
-                <div className="flex items-center justify-end gap-2 pt-1 border-t border-amber-500/20">
-                  <button
-                    onClick={() => {
-                      setMicPermissionError(null);
-                      toggleMicrophone();
-                    }}
-                    className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors"
-                  >
-                    Try Again
-                  </button>
-                  <button
-                    onClick={() => {
-                      setMicPermissionError(null);
-                      setLayoutMode('split');
-                    }}
-                    className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition-colors"
-                  >
-                    Type Instead
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Primary Mic Controls */}
-            <div className="flex items-center gap-4">
-              <button
-                onClick={toggleMicrophone}
-                className={`relative group p-4 sm:p-5 rounded-full transition-all duration-300 shadow-2xl flex items-center justify-center ${
-                  isMicActive
-                    ? 'bg-rose-500 hover:bg-rose-600 text-white shadow-rose-500/30'
-                    : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/30'
-                }`}
-                title={isMicActive ? 'Mute Microphone' : 'Start Speaking with Myraa'}
-              >
-                {isMicActive ? (
-                  <Mic className="w-6 h-6 animate-pulse" />
-                ) : (
-                  <MicOff className="w-6 h-6" />
-                )}
-
-                {/* Subtle pulse ring when active */}
-                {isMicActive && (
-                  <span className="absolute inset-0 rounded-full border-2 border-rose-400 animate-ping opacity-30 pointer-events-none" />
-                )}
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-400 text-center">
-              {isMicActive
-                ? isUserSpeaking
-                  ? 'Hearing your voice...'
-                  : 'Microphone live · Speak naturally at any moment'
-                : 'Tap microphone to converse, or type below'}
-            </p>
-
-            {/* Quick text input in immersive mode */}
-            {layoutMode === 'immersive' && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const target = e.currentTarget.elements.namedItem('immersiveInput') as HTMLInputElement;
-                  if (target && target.value.trim()) {
-                    handleSendMessage(target.value.trim());
-                    target.value = '';
-                  }
-                }}
-                className="w-full flex items-center gap-2 bg-slate-900/80 border border-slate-800 rounded-xl px-3 py-1.5 focus-within:border-indigo-500 transition-colors"
-              >
-                <input
-                  name="immersiveInput"
-                  type="text"
-                  placeholder="Type a thought or question..."
-                  className="flex-1 bg-transparent text-xs sm:text-sm text-slate-200 placeholder-slate-500 focus:outline-none"
-                />
-                <button
-                  type="submit"
-                  className="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex items-center justify-center shrink-0"
-                  title="Send"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                </button>
-              </form>
-            )}
-          </div>
-        </section>
-
-        {/* Right / Stream Panel (Always visible in Split mode, or collapsible) */}
-        {layoutMode === 'split' && (
-          <section className="w-full lg:w-[480px] h-[600px] lg:h-auto flex flex-col animate-fade-in">
-            <LiveTranscript
-              turns={turns}
-              liveStreamingText={liveStreamingText}
-              isStreaming={isThinking || isMyraaSpeaking}
-              onSendMessage={handleSendMessage}
-              onTriggerPrompt={handleSendMessage}
-            />
-          </section>
-        )}
-      </main>
+          )}
+        </div>
+      </div>
 
       {/* Floating quick starter in immersive mode */}
       {layoutMode === 'immersive' && turns.length === 0 && !isMicActive && (
@@ -1623,6 +1945,31 @@ export default function App() {
         pendingConfirmation={pendingConfirmation}
         onConfirm={handleExecuteConfirmation}
         onCancel={() => setPendingConfirmation(null)}
+      />
+
+      {/* Real-Time Screen Perception & Vision Panel */}
+      <ScreenViewPanel
+        isOpen={isScreenViewOpen}
+        onClose={() => setIsScreenViewOpen(false)}
+        globalStream={screenStream}
+        isGloballyCapturing={isScreenSharing}
+        globalObservations={screenObservations}
+        latestObservation={latestObservation}
+        onGlobalStartCapture={startScreenShare}
+        onGlobalStopCapture={stopScreenShare}
+        onGlobalAnalyzeFrame={captureAndAnalyzeFrame}
+        continuousVisionActive={continuousVisionActive}
+        onToggleContinuousVision={() => setContinuousVisionActive(!continuousVisionActive)}
+        onSpeakCommentary={(bengaliAdvice) => {
+          handleSendMessage(`[Screen Event]: ${bengaliAdvice}`);
+        }}
+      />
+
+      {/* Interactive Web Browser Modal */}
+      <WebBrowserModal
+        isOpen={isBrowserOpen}
+        onClose={() => setIsBrowserOpen(false)}
+        initialUrl={browserUrl}
       />
     </div>
   );

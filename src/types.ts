@@ -14,6 +14,68 @@ export type CompanionStateMachineState =
   | 'paused'
   | 'quiet';
 
+export type AvatarState =
+  | 'idle'
+  | 'listening'
+  | 'thinking'
+  | 'speaking'
+  | 'happy'
+  | 'concerned'
+  | 'interrupted'
+  | 'error';
+
+export type DashboardSection =
+  | 'home'
+  | 'voice'
+  | 'screen'
+  | 'computer'
+  | 'phone'
+  | 'memory'
+  | 'files'
+  | 'settings';
+
+export type VisemeName =
+  | 'silence'
+  | 'aa'
+  | 'oh'
+  | 'ee'
+  | 'consonant'
+  | 'f'
+  | 'm';
+
+export interface VisemeWeights {
+  silence: number;
+  aa: number;
+  oh: number;
+  ee: number;
+  consonant: number;
+  f: number;
+  m: number;
+  jawOpen: number;
+  mouthWidth: number;
+  smileAmount: number;
+}
+
+export interface ScreenEventObservation {
+  id: string;
+  timestamp: number;
+  summary: string;
+  detectedApp?: string;
+  riskLevel?: 'safe' | 'warning' | 'critical';
+  confidence: number;
+  shouldSpeak?: boolean;
+  adviceInBengali?: string;
+}
+
+export interface PhonePairingStatus {
+  isPaired: boolean;
+  deviceName?: string;
+  batteryLevel?: number;
+  lastSync?: number;
+  pairCode?: string;
+  notificationsCount?: number;
+}
+
 export type MemoryCategory =
   | 'personal'
   | 'preference'

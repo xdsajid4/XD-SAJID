@@ -9,6 +9,8 @@ import {
   LayoutGrid,
   BellOff,
   Monitor,
+  Eye,
+  Smartphone,
 } from 'lucide-react';
 import type { VoicePersona, AmbientSoundType } from '../types';
 
@@ -26,6 +28,8 @@ interface CompanionHeaderProps {
   onOpenMemory: () => void;
   onOpenDesktopAssistant: () => void;
   onOpenWindowsAutomation: () => void;
+  onOpenScreenView?: () => void;
+  onOpenPhoneConnect?: () => void;
   onToggleAmbient: () => void;
   onToggleQuietMode: () => void;
 }
@@ -44,6 +48,8 @@ export const CompanionHeader: React.FC<CompanionHeaderProps> = ({
   onOpenMemory,
   onOpenDesktopAssistant,
   onOpenWindowsAutomation,
+  onOpenScreenView,
+  onOpenPhoneConnect,
   onToggleAmbient,
   onToggleQuietMode,
 }) => {
@@ -114,6 +120,30 @@ export const CompanionHeader: React.FC<CompanionHeaderProps> = ({
             <VolumeX className="w-3.5 h-3.5" />
           )}
         </button>
+
+        {/* Screen View Trigger */}
+        {onOpenScreenView && (
+          <button
+            onClick={onOpenScreenView}
+            className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-xs text-slate-200 flex items-center gap-1.5 transition-colors"
+            title="Screen Perception & Vision"
+          >
+            <Eye className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden sm:inline">Screen</span>
+          </button>
+        )}
+
+        {/* Phone Connect Trigger */}
+        {onOpenPhoneConnect && (
+          <button
+            onClick={onOpenPhoneConnect}
+            className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-xs text-slate-200 flex items-center gap-1.5 transition-colors"
+            title="Phone Connect & Mobile Sync"
+          >
+            <Smartphone className="w-3.5 h-3.5 text-purple-400" />
+            <span className="hidden sm:inline">Phone</span>
+          </button>
+        )}
 
         {/* Windows PC Automation Trigger */}
         <button
